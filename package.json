@@ -1,0 +1,11 @@
+{
+  "name": "forecaster",
+  "scripts": {
+    "dev": "concurrently \"uv run uvicorn api:app --reload --port 8000\" \"npm run dev --prefix frontend\"",
+    "dev:backend": "uv run uvicorn api:app --reload --port 8000",
+    "dev:frontend": "npm run dev --prefix frontend"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.0"
+  }
+}

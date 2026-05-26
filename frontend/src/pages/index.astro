@@ -1,0 +1,916 @@
+---
+import Layout from '../layouts/Layout.astro';
+---
+<Layout title="Forecaster">
+  <div class="container">
+    <h1>📈 Forecaster</h1>
+
+    <section class="upload-section">
+      <h2>Archivo Excel</h2>
+      <div id="fileList"></div>
+      <form id="uploadForm">
+        <input type="file" id="fileInput" accept=".xlsx" />
+        <button type="submit" id="uploadBtn">Subir y procesar</button>
+      </form>
+      <p id="uploadStatus"></p>
+    </section>
+
+    <section class="upload-section bq-section">
+      <h2>CSV BigQuery</h2>
+      <div id="csvFileList"></div>
+      <form id="bqUploadForm">
+        <input type="file" id="bqFileInput" accept=".csv" />
+        <input type="text" id="bqRolInput" placeholder="Rol (ej: CDN, CORE)" value="" />
+        <button type="submit" id="bqUploadBtn">📊 Subir CSV BigQuery</button>
+      </form>
+      <p id="bqUploadStatus"></p>
+    </section>
+
+    <section class="upload-section hist-section">
+      <h2>CSV Histórico Proveedores</h2>
+      <form id="histUploadForm">
+        <input type="file" id="histFileInput" accept=".csv" />
+        <button type="submit" id="histUploadBtn">📋 Subir CSV Histórico</button>
+      </form>
+      <p id="histUploadStatus"></p>
+    </section>
+
+    <section class="upload-section reimport-section">
+      <h2>Reimportar Excel Forecasteado</h2>
+      <form id="reimportForm">
+        <input type="file" id="reimportFileInput" accept=".xlsx" />
+        <button type="submit" id="reimportBtn">🔄 Reimportar para editar</button>
+      </form>
+      <p id="reimportStatus"></p>
+    </section>
+
+    <section class="upload-section completar-section">
+      <h2>Completar Forecast (equipos fallidos)</h2>
+      <form id="completarForm">
+        <input type="file" id="completarFileInput" accept=".xlsx" />
+        <textarea id="completarEquipos" placeholder="Un equipo por línea: Equipo, Rol, Metrica&#10;Ej:&#10;TIKTOK, PEER, MAXIMO&#10;DISNEY, PEER, MAXIMO&#10;AKAMAI, PEER, MAXIMO" rows="4"></textarea>
+        <div style="display:flex;gap:1rem;">
+          <button type="submit" id="completarBtn">🧩 Completar y descargar</button>
+          <button type="button" id="completarClearBtn" class="clear-btn">🗑️ Limpiar todo</button>
+        </div>
+      </form>
+      <p id="completarStatus"></p>
+    </section>
+
+    <section class="chart-section">
+      <h2>Visualizar Forecast</h2>
+      <div class="controls">
+        <select id="equipoSelect">
+          <option value="">-- Seleccionar equipo --</option>
+        </select>
+        <button id="exportAllBtn">📥 Exportar Todo a Excel</button>
+        <button id="trendDownBtn" class="trend-btn" style="display:none;">📉 Menos pendiente</button>
+        <button id="trendUpBtn" class="trend-btn" style="display:none;">📈 Más pendiente</button>
+        <button id="zeroBtn" class="zero-btn" style="display:none;">0️⃣ Forecast a cero</button>
+        <button id="validateP95Btn" class="validate-btn" style="display:none;">🔍 Validar P95 vs MAX</button>
+        <button id="saveBtn" class="save-btn" style="display:none;">💾 Guardar cambios</button>
+      </div>
+      <p id="dragHint" class="drag-hint" style="display:none;">Arrastrá los puntos naranjas del forecast para ajustar valores</p>
+      <div class="chart-wrapper">
+        <canvas id="forecastChart"></canvas>
+      </div>
+      <div id="outlierSection" style="display:none;">
+        <h3>⚠️ Picos detectados (posibles incidentes)</h3>
+        <p class="outlier-hint">Marcá los que son incidentes para excluirlos del forecast</p>
+        <div id="outlierList"></div>
+        <button id="recalcSinOutliersBtn">🔄 Recalcular sin incidentes</button>
+      </div>
+      <div id="errorList"></div>
+      <div class="validate-all-section">
+        <button id="validateAllBtn" class="validate-all-btn">🔍 Validar P95 vs MAX (todos los equipos)</button>
+        <div id="validateAllResults"></div>
+      </div>
+    </section>
+  </div>
+</Layout>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+
+<script>
+const API = 'http://localhost:8000';
+
+const uploadForm = document.getElementById('uploadForm') as HTMLFormElement;
+const fileInput = document.getElementById('fileInput') as HTMLInputElement;
+const uploadBtn = document.getElementById('uploadBtn') as HTMLButtonElement;
+const uploadStatus = document.getElementById('uploadStatus')!;
+const fileList = document.getElementById('fileList')!;
+const csvFileList = document.getElementById('csvFileList')!;
+const bqUploadForm = document.getElementById('bqUploadForm') as HTMLFormElement;
+const bqFileInput = document.getElementById('bqFileInput') as HTMLInputElement;
+const bqUploadBtn = document.getElementById('bqUploadBtn') as HTMLButtonElement;
+const bqRolInput = document.getElementById('bqRolInput') as HTMLInputElement;
+const bqUploadStatus = document.getElementById('bqUploadStatus')!;
+const histUploadForm = document.getElementById('histUploadForm') as HTMLFormElement;
+const histFileInput = document.getElementById('histFileInput') as HTMLInputElement;
+const histUploadBtn = document.getElementById('histUploadBtn') as HTMLButtonElement;
+const histUploadStatus = document.getElementById('histUploadStatus')!;
+const reimportForm = document.getElementById('reimportForm') as HTMLFormElement;
+const reimportFileInput = document.getElementById('reimportFileInput') as HTMLInputElement;
+const reimportBtn = document.getElementById('reimportBtn') as HTMLButtonElement;
+const reimportStatus = document.getElementById('reimportStatus')!;
+const completarForm = document.getElementById('completarForm') as HTMLFormElement;
+const completarFileInput = document.getElementById('completarFileInput') as HTMLInputElement;
+const completarEquipos = document.getElementById('completarEquipos') as HTMLTextAreaElement;
+const completarBtn = document.getElementById('completarBtn') as HTMLButtonElement;
+const completarClearBtn = document.getElementById('completarClearBtn') as HTMLButtonElement;
+const completarStatus = document.getElementById('completarStatus')!;
+const equipoSelect = document.getElementById('equipoSelect') as HTMLSelectElement;
+const exportAllBtn = document.getElementById('exportAllBtn') as HTMLButtonElement;
+const trendDownBtn = document.getElementById('trendDownBtn') as HTMLButtonElement;
+const trendUpBtn = document.getElementById('trendUpBtn') as HTMLButtonElement;
+const zeroBtn = document.getElementById('zeroBtn') as HTMLButtonElement;
+const validateP95Btn = document.getElementById('validateP95Btn') as HTMLButtonElement;
+const canvas = document.getElementById('forecastChart') as HTMLCanvasElement;
+const outlierSection = document.getElementById('outlierSection')!;
+const outlierList = document.getElementById('outlierList')!;
+const recalcSinOutliersBtn = document.getElementById('recalcSinOutliersBtn') as HTMLButtonElement;
+const errorListDiv = document.getElementById('errorList')!;
+const saveBtn = document.getElementById('saveBtn') as HTMLButtonElement;
+const dragHint = document.getElementById('dragHint')!;
+
+const validateAllBtn = document.getElementById('validateAllBtn') as HTMLButtonElement;
+const validateAllResults = document.getElementById('validateAllResults')!;
+
+let chart: any = null;
+let currentData: any[] = [];
+let hasUnsavedChanges = false;
+
+// --- Archivos ---
+async function cargarArchivos() {
+  try {
+    const res = await fetch(`${API}/api/archivos`);
+    const data = await res.json();
+    fileList.innerHTML = '';
+    if (data.archivos.length === 0) {
+      fileList.innerHTML = '<p class="no-files">No hay archivos subidos</p>';
+      return;
+    }
+    data.archivos.forEach((nombre: string) => {
+      const item = document.createElement('div');
+      item.className = 'file-item';
+      item.innerHTML = `
+        <span class="file-name">📄 ${nombre}</span>
+        <button class="delete-btn" data-name="${nombre}">✕ Borrar</button>
+      `;
+      fileList.appendChild(item);
+    });
+    // Bind delete buttons
+    fileList.querySelectorAll('.delete-btn').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        const name = (e.target as HTMLElement).getAttribute('data-name')!;
+        if (!confirm(`¿Borrar "${name}" y todos sus forecasts?`)) return;
+        (e.target as HTMLButtonElement).disabled = true;
+        (e.target as HTMLButtonElement).textContent = '...';
+        await fetch(`${API}/api/archivos/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        await cargarArchivos();
+        await cargarEquipos();
+        if (chart) { chart.destroy(); chart = null; }
+      });
+    });
+  } catch { fileList.innerHTML = '<p class="no-files">Error cargando archivos</p>'; }
+}
+
+// --- CSV Archivos ---
+async function cargarCsvArchivos() {
+  try {
+    const res = await fetch(`${API}/api/csv-archivos`);
+    const data = await res.json();
+    csvFileList.innerHTML = '';
+    if (data.archivos.length === 0) {
+      csvFileList.innerHTML = '<p class="no-files">No hay archivos CSV subidos</p>';
+      return;
+    }
+    data.archivos.forEach((nombre: string) => {
+      const item = document.createElement('div');
+      item.className = 'file-item';
+      item.innerHTML = `
+        <span class="file-name">📊 ${nombre}</span>
+        <button class="delete-btn" data-name="${nombre}">✕ Borrar</button>
+      `;
+      csvFileList.appendChild(item);
+    });
+    csvFileList.querySelectorAll('.delete-btn').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        const name = (e.target as HTMLElement).getAttribute('data-name')!;
+        if (!confirm(`¿Borrar "${name}" y todos sus forecasts?`)) return;
+        (e.target as HTMLButtonElement).disabled = true;
+        (e.target as HTMLButtonElement).textContent = '...';
+        await fetch(`${API}/api/csv-archivos/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        await cargarCsvArchivos();
+        await cargarEquipos();
+        if (chart) { chart.destroy(); chart = null; }
+      });
+    });
+  } catch { csvFileList.innerHTML = '<p class="no-files">Error cargando archivos CSV</p>'; }
+}
+
+// --- Equipos ---
+async function cargarEquipos() {
+  try {
+    const res = await fetch(`${API}/api/equipos`);
+    const data = await res.json();
+    equipoSelect.innerHTML = '<option value="">-- Seleccionar equipo --</option>';
+    data.equipos.forEach((eq: string) => {
+      const opt = document.createElement('option');
+      opt.value = eq;
+      opt.textContent = eq.replace(/_/g, ' ');
+      equipoSelect.appendChild(opt);
+    });
+  } catch {}
+}
+
+// --- Gráfico ---
+async function dibujarGrafico(equipo: string) {
+  if (!equipo) { return; }
+  const res = await fetch(`${API}/api/forecast/${equipo}`);
+  const data = await res.json();
+  const datos = data.datos;
+  currentData = datos;
+  hasUnsavedChanges = false;
+  saveBtn.style.display = 'none';
+
+  // Detectar si hay outliers para determinar intervalo
+  const tieneOutliers = datos.some((d: any) => d.outlier === 'si');
+  const pctIntervalo = tieneOutliers ? 0.20 : 0.10;
+
+  const labels = datos.map((d: any) => d.ds);
+  const historico = datos.map((d: any) => d.tipo === 'historico' ? d.y : null);
+  const forecast = datos.map((d: any) => d.tipo === 'forecast' ? d.y : null);
+
+  // Bandas de confianza (solo en forecast)
+  const bandaSuperior = datos.map((d: any) => d.tipo === 'forecast' ? d.y * (1 + pctIntervalo) : null);
+  const bandaInferior = datos.map((d: any) => d.tipo === 'forecast' ? d.y * (1 - pctIntervalo) : null);
+
+  // Conectar último histórico con primer forecast
+  const lastHistIdx = datos.reduce((acc: number, d: any, i: number) => d.tipo === 'historico' ? i : acc, -1);
+  if (lastHistIdx >= 0 && lastHistIdx + 1 < datos.length) {
+    forecast[lastHistIdx] = datos[lastHistIdx].y;
+    bandaSuperior[lastHistIdx] = datos[lastHistIdx].y * (1 + pctIntervalo);
+    bandaInferior[lastHistIdx] = datos[lastHistIdx].y * (1 - pctIntervalo);
+  }
+
+  if (chart) chart.destroy();
+
+  chart = new (window as any).Chart(canvas, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'Histórico',
+          data: historico,
+          borderColor: '#3b82f6',
+          backgroundColor: 'rgba(59,130,246,0.1)',
+          borderWidth: 2,
+          pointRadius: 3,
+          pointHoverRadius: 6,
+          spanGaps: false,
+          fill: true,
+        },
+        {
+          label: 'Forecast',
+          data: forecast,
+          borderColor: '#f97316',
+          backgroundColor: 'rgba(249,115,22,0.05)',
+          borderWidth: 2,
+          borderDash: [6, 3],
+          pointRadius: 5,
+          pointHoverRadius: 8,
+          pointHitRadius: 15,
+          spanGaps: false,
+          fill: false,
+        },
+        {
+          label: `Intervalo +${Math.round(pctIntervalo*100)}%`,
+          data: bandaSuperior,
+          borderColor: 'rgba(249,115,22,0.3)',
+          backgroundColor: 'rgba(249,115,22,0.08)',
+          borderWidth: 1,
+          borderDash: [2, 2],
+          pointRadius: 0,
+          spanGaps: false,
+          fill: '+1',
+        },
+        {
+          label: `Intervalo -${Math.round(pctIntervalo*100)}%`,
+          data: bandaInferior,
+          borderColor: 'rgba(249,115,22,0.3)',
+          backgroundColor: 'rgba(249,115,22,0.08)',
+          borderWidth: 1,
+          borderDash: [2, 2],
+          pointRadius: 0,
+          spanGaps: false,
+          fill: false,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        tooltip: {
+          callbacks: {
+            label: (ctx: any) => `${ctx.dataset.label}: ${Math.round(ctx.parsed.y).toLocaleString()}`,
+          },
+        },
+        legend: {
+          labels: {
+            color: '#e2e8f0',
+            filter: (item: any) => !item.text.startsWith('Intervalo'),
+          },
+        },
+      },
+      scales: {
+        x: { ticks: { color: '#94a3b8', maxRotation: 45 }, grid: { color: 'rgba(148,163,184,0.1)' } },
+        y: { ticks: { color: '#94a3b8', callback: (v: number) => v.toLocaleString() }, grid: { color: 'rgba(148,163,184,0.1)' } },
+      },
+    },
+  });
+
+  // --- Drag manual con eventos de mouse ---
+  let draggingIndex: number | null = null;
+
+  canvas.addEventListener('mousedown', (e: MouseEvent) => {
+    const points = chart.getElementsAtEventForMode(e, 'nearest', { intersect: true }, false);
+    if (points.length > 0 && points[0].datasetIndex === 1) {
+      draggingIndex = points[0].index;
+      canvas.style.cursor = 'grabbing';
+    }
+  });
+
+  canvas.addEventListener('mousemove', (e: MouseEvent) => {
+    if (draggingIndex === null) {
+      // Cambiar cursor si está sobre un punto de forecast
+      const points = chart.getElementsAtEventForMode(e, 'nearest', { intersect: true }, false);
+      canvas.style.cursor = (points.length > 0 && points[0].datasetIndex === 1) ? 'grab' : 'default';
+      return;
+    }
+    const rect = canvas.getBoundingClientRect();
+    const yPixel = e.clientY - rect.top;
+    const yValue = chart.scales.y.getValueForPixel(yPixel);
+    if (yValue == null) return;
+
+    const rounded = Math.round(yValue);
+    chart.data.datasets[1].data[draggingIndex] = rounded;
+    chart.data.datasets[2].data[draggingIndex] = rounded * (1 + pctIntervalo);
+    chart.data.datasets[3].data[draggingIndex] = rounded * (1 - pctIntervalo);
+    chart.update('none');
+  });
+
+  canvas.addEventListener('mouseup', () => {
+    if (draggingIndex !== null) {
+      const newVal = chart.data.datasets[1].data[draggingIndex];
+      const fecha = labels[draggingIndex];
+      const item = currentData.find((d: any) => d.ds === fecha && d.tipo === 'forecast');
+      if (item && newVal != null) {
+        item.y = Math.round(newVal);
+        hasUnsavedChanges = true;
+        saveBtn.style.display = 'inline-block';
+      }
+      draggingIndex = null;
+      canvas.style.cursor = 'default';
+    }
+  });
+
+  canvas.addEventListener('mouseleave', () => {
+    draggingIndex = null;
+    canvas.style.cursor = 'default';
+  });
+
+  trendDownBtn.style.display = 'inline-block';
+  trendUpBtn.style.display = 'inline-block';
+  zeroBtn.style.display = 'inline-block';
+  validateP95Btn.style.display = 'inline-block';
+  dragHint.style.display = 'block';
+
+  // Cargar outliers detectados
+  try {
+    const outRes = await fetch(`${API}/api/outliers/${encodeURIComponent(equipo)}`);
+    const outData = await outRes.json();
+    if (outData.outliers && outData.outliers.length > 0) {
+      outlierSection.style.display = 'block';
+      outlierList.innerHTML = outData.outliers.map((fecha: string) =>
+        `<label class="outlier-item">
+          <input type="checkbox" value="${fecha}" checked />
+          <span>${fecha}</span>
+        </label>`
+      ).join('');
+    } else {
+      outlierSection.style.display = 'none';
+    }
+  } catch { outlierSection.style.display = 'none'; }
+}
+
+// --- Upload ---
+uploadForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const file = fileInput?.files?.[0];
+  if (!file) return;
+
+  uploadBtn.disabled = true;
+  uploadBtn.textContent = 'Procesando...';
+  uploadStatus.textContent = 'Subiendo y procesando, esto puede tardar...';
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  try {
+    const res = await fetch(`${API}/api/upload`, { method: 'POST', body: formData });
+    const data = await res.json();
+    uploadStatus.textContent = data.message || data.error;
+    fileInput.value = '';
+    await cargarArchivos();
+    await cargarEquipos();
+    // Mostrar errores de forecast
+    if (data.errores && data.errores.length > 0) {
+      errorListDiv.innerHTML = `
+        <div class="error-box">
+          <h3>⚠️ Equipos no forecasteados (${data.errores.length})</h3>
+          <ul>${data.errores.map((e: any) => `<li><span class="err-equipo">${e.equipo.replace(/_/g, ' ')}</span>: ${e.motivo}</li>`).join('')}</ul>
+        </div>`;
+    } else {
+      errorListDiv.innerHTML = '';
+    }
+  } catch {
+    uploadStatus.textContent = 'Error al procesar el archivo.';
+  } finally {
+    uploadBtn.disabled = false;
+    uploadBtn.textContent = 'Subir y procesar';
+  }
+});
+
+// --- Cambio equipo ---
+equipoSelect.addEventListener('change', () => dibujarGrafico(equipoSelect.value));
+
+// --- Upload BigQuery CSV ---
+bqUploadForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const file = bqFileInput?.files?.[0];
+  if (!file) return;
+
+  const rol = bqRolInput.value.trim();
+  if (!rol) {
+    bqUploadStatus.textContent = '⚠️ Ingresá un Rol antes de subir.';
+    bqRolInput.focus();
+    return;
+  }
+
+  bqUploadBtn.disabled = true;
+  bqUploadBtn.textContent = 'Procesando...';
+  bqUploadStatus.textContent = 'Subiendo y procesando CSV, esto puede tardar...';
+
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('rol', rol);
+
+  try {
+    const res = await fetch(`${API}/api/upload-bq-csv`, { method: 'POST', body: formData });
+    const data = await res.json();
+    if (data.error) {
+      bqUploadStatus.textContent = `❌ ${data.error}`;
+    } else {
+      bqUploadStatus.textContent = data.message || 'Procesado correctamente.';
+      bqFileInput.value = '';
+      await cargarArchivos();
+      await cargarCsvArchivos();
+      await cargarEquipos();
+      // Mostrar errores
+      if (data.errores && data.errores.length > 0) {
+        errorListDiv.innerHTML = `
+          <div class="error-box">
+            <h3>⚠️ Equipos no forecasteados (${data.errores.length})</h3>
+            <ul>${data.errores.map((e: any) => `<li><span class="err-equipo">${e.equipo.replace(/_/g, ' ')}</span>: ${e.motivo}</li>`).join('')}</ul>
+          </div>`;
+      } else {
+        errorListDiv.innerHTML = '';
+      }
+    }
+  } catch {
+    bqUploadStatus.textContent = 'Error al procesar el CSV.';
+  } finally {
+    bqUploadBtn.disabled = false;
+    bqUploadBtn.textContent = '📊 Subir CSV BigQuery';
+  }
+});
+
+// --- Reimportar Excel ---
+reimportForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const file = reimportFileInput?.files?.[0];
+  if (!file) return;
+
+  reimportBtn.disabled = true;
+  reimportBtn.textContent = 'Reimportando...';
+  reimportStatus.textContent = 'Procesando Excel...';
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  try {
+    const res = await fetch(`${API}/api/reimportar-excel`, { method: 'POST', body: formData });
+    const data = await res.json();
+    if (data.error) {
+      reimportStatus.textContent = `❌ ${data.error}`;
+    } else {
+      reimportStatus.textContent = data.message || 'Reimportado correctamente.';
+      reimportFileInput.value = '';
+      await cargarArchivos();
+      await cargarEquipos();
+    }
+  } catch {
+    reimportStatus.textContent = 'Error al reimportar.';
+  } finally {
+    reimportBtn.disabled = false;
+    reimportBtn.textContent = '🔄 Reimportar para editar';
+  }
+});
+
+// --- Completar Forecast ---
+completarForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const file = completarFileInput?.files?.[0];
+  const equipos = completarEquipos.value.trim();
+  if (!file) { completarStatus.textContent = '⚠️ Seleccioná un archivo Excel.'; return; }
+  if (!equipos) { completarStatus.textContent = '⚠️ Ingresá la lista de equipos.'; return; }
+
+  completarBtn.disabled = true;
+  completarBtn.textContent = 'Procesando...';
+  completarStatus.textContent = 'Generando forecast iterativo y completando Excel...';
+
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('equipos', equipos);
+
+  try {
+    const res = await fetch(`${API}/api/completar-forecast`, { method: 'POST', body: formData });
+    if (res.ok) {
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'forecast_completado.xlsx';
+      a.click();
+      URL.revokeObjectURL(url);
+      completarStatus.textContent = '✅ Excel completado descargado.';
+      completarFileInput.value = '';
+      completarEquipos.value = '';
+      await cargarEquipos();
+    } else {
+      const data = await res.json();
+      completarStatus.textContent = `❌ ${data.error || 'Error al completar'}`;
+    }
+  } catch {
+    completarStatus.textContent = 'Error al procesar.';
+  } finally {
+    completarBtn.disabled = false;
+    completarBtn.textContent = '🧩 Completar y descargar';
+  }
+});
+
+// --- Limpiar completar ---
+completarClearBtn.addEventListener('click', async function() {
+  if (!confirm('¿Borrar TODOS los datos procesados (archivos, forecasts, visualizador)?')) return;
+  completarClearBtn.disabled = true;
+  completarClearBtn.textContent = 'Borrando...';
+  try {
+    await fetch(`${API}/api/borrar-todo`, { method: 'DELETE' });
+    completarForm.reset();
+    completarStatus.textContent = '✅ Todo borrado.';
+    // Limpiar visualizador
+    if (chart) { chart.destroy(); chart = null; }
+    equipoSelect.innerHTML = '<option value="">-- Seleccionar equipo --</option>';
+    errorListDiv.innerHTML = '';
+    validateAllResults.innerHTML = '';
+    await cargarArchivos();
+    await cargarCsvArchivos();
+    await cargarEquipos();
+  } catch {
+    completarStatus.textContent = 'Error al borrar.';
+  }
+  completarClearBtn.disabled = false;
+  completarClearBtn.textContent = '🗑️ Limpiar todo';
+});
+
+// --- Upload Histórico CSV ---
+histUploadForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const file = histFileInput?.files?.[0];
+  if (!file) return;
+
+  histUploadBtn.disabled = true;
+  histUploadBtn.textContent = 'Procesando...';
+  histUploadStatus.textContent = 'Subiendo y procesando CSV histórico...';
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  try {
+    const res = await fetch(`${API}/api/upload-historico-csv`, { method: 'POST', body: formData });
+    const data = await res.json();
+    if (data.error) {
+      histUploadStatus.textContent = `❌ ${data.error}`;
+    } else {
+      histUploadStatus.textContent = data.message || 'Procesado correctamente.';
+      histFileInput.value = '';
+      await cargarCsvArchivos();
+      await cargarEquipos();
+      if (data.errores && data.errores.length > 0) {
+        errorListDiv.innerHTML = `
+          <div class="error-box">
+            <h3>⚠️ Equipos no forecasteados (${data.errores.length})</h3>
+            <ul>${data.errores.map((e: any) => `<li><span class="err-equipo">${e.equipo.replace(/_/g, ' ')}</span>: ${e.motivo}</li>`).join('')}</ul>
+          </div>`;
+      } else {
+        errorListDiv.innerHTML = '';
+      }
+    }
+  } catch {
+    histUploadStatus.textContent = 'Error al procesar el CSV.';
+  } finally {
+    histUploadBtn.disabled = false;
+    histUploadBtn.textContent = '📋 Subir CSV Histórico';
+  }
+});
+
+// --- Exportar Todo ---
+exportAllBtn.addEventListener('click', () => {
+  window.open(`${API}/api/exportar-todo`, '_blank');
+});
+
+// --- Recalcular tendencia ---
+async function recalcular(ajuste: string) {
+  const equipo = equipoSelect.value;
+  if (!equipo) return;
+  const btn = ajuste === 'mas_baja' ? trendDownBtn : trendUpBtn;
+  const textoOriginal = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Recalculando...';
+  try {
+    await fetch(`${API}/api/recalcular/${encodeURIComponent(equipo)}?ajuste=${ajuste}`, { method: 'POST' });
+    await dibujarGrafico(equipo);
+  } catch { }
+  btn.disabled = false;
+  btn.textContent = textoOriginal;
+}
+
+trendDownBtn.addEventListener('click', () => recalcular('mas_baja'));
+trendUpBtn.addEventListener('click', () => recalcular('mas_alta'));
+
+// --- Forecast a cero ---
+zeroBtn.addEventListener('click', () => {
+  const equipo = equipoSelect.value;
+  if (!equipo) return;
+  if (!confirm('¿Poner todos los valores de forecast a 0?')) return;
+
+  currentData.forEach((d: any) => {
+    if (d.tipo === 'forecast') d.y = 0;
+  });
+  hasUnsavedChanges = true;
+  saveBtn.style.display = 'inline-block';
+
+  // Actualizar gráfico
+  const pctIntervalo = currentData.some((d: any) => d.outlier === 'si') ? 0.20 : 0.10;
+  currentData.forEach((d: any, i: number) => {
+    if (d.tipo === 'forecast') {
+      chart.data.datasets[1].data[i] = 0;
+      chart.data.datasets[2].data[i] = 0;
+      chart.data.datasets[3].data[i] = 0;
+    }
+  });
+  chart.update();
+});
+
+// --- Validar P95 vs MAXIMO ---
+validateP95Btn.addEventListener('click', async () => {
+  const equipo = equipoSelect.value;
+  if (!equipo) return;
+
+  validateP95Btn.disabled = true;
+  validateP95Btn.textContent = 'Validando...';
+
+  try {
+    const res = await fetch(`${API}/api/validar-p95/${encodeURIComponent(equipo)}`);
+    const data = await res.json();
+
+    if (data.alertas && data.alertas.length > 0) {
+      errorListDiv.innerHTML = `
+        <div class="error-box" style="border-color: #f59e0b;">
+          <h3>⚠️ P95 supera a MAXIMO en ${data.alertas.length} fecha(s)</h3>
+          <ul>${data.alertas.map((a: any) => `<li><span class="err-equipo">${a.fecha}</span>: P95=${Math.round(a.valor_p95).toLocaleString()} ≥ MAX=${Math.round(a.valor_maximo).toLocaleString()}</li>`).join('')}</ul>
+        </div>`;
+    } else {
+      errorListDiv.innerHTML = `
+        <div class="error-box" style="border-color: #10b981;">
+          <h3>✅ ${data.message}</h3>
+        </div>`;
+    }
+  } catch {
+    errorListDiv.innerHTML = '<div class="error-box"><h3>Error al validar</h3></div>';
+  }
+
+  validateP95Btn.disabled = false;
+  validateP95Btn.textContent = '🔍 Validar P95 vs MAX';
+});
+
+// --- Recalcular sin outliers ---
+recalcSinOutliersBtn.addEventListener('click', async () => {
+  const equipo = equipoSelect.value;
+  if (!equipo) return;
+
+  // Obtener fechas marcadas
+  const checkboxes = outlierList.querySelectorAll('input[type="checkbox"]:checked');
+  const fechasExcluidas = Array.from(checkboxes).map((cb: any) => cb.value);
+
+  recalcSinOutliersBtn.disabled = true;
+  recalcSinOutliersBtn.textContent = 'Recalculando...';
+
+  try {
+    await fetch(`${API}/api/recalcular-sin-outliers/${encodeURIComponent(equipo)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fechas_excluidas: fechasExcluidas }),
+    });
+    await dibujarGrafico(equipo);
+  } catch {}
+
+  recalcSinOutliersBtn.disabled = false;
+  recalcSinOutliersBtn.textContent = '🔄 Recalcular sin incidentes';
+});
+
+// --- Guardar cambios manuales ---
+saveBtn.addEventListener('click', async () => {
+  const equipo = equipoSelect.value;
+  if (!equipo || !hasUnsavedChanges) return;
+
+  saveBtn.disabled = true;
+  saveBtn.textContent = 'Guardando...';
+
+  try {
+    await fetch(`${API}/api/guardar-forecast/${encodeURIComponent(equipo)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ datos: currentData }),
+    });
+    hasUnsavedChanges = false;
+    saveBtn.style.display = 'none';
+  } catch {}
+
+  saveBtn.disabled = false;
+  saveBtn.textContent = '💾 Guardar cambios';
+});
+
+// --- Validar P95 vs MAX todos ---
+validateAllBtn.addEventListener('click', async () => {
+  validateAllBtn.disabled = true;
+  validateAllBtn.textContent = 'Validando todos...';
+  validateAllResults.innerHTML = '';
+
+  try {
+    const res = await fetch(`${API}/api/validar-p95-todos`);
+    const data = await res.json();
+
+    if (data.equipos_con_problemas === 0) {
+      validateAllResults.innerHTML = `
+        <div class="error-box" style="border-color: #10b981;">
+          <h3>✅ Todos los equipos OK (${data.total_equipos_validados} validados)</h3>
+          <p style="color:#94a3b8;font-size:0.9rem;">P95 siempre por debajo de MAXIMO en todos los equipos.</p>
+        </div>`;
+    } else {
+      let html = `<div class="error-box" style="border-color: #f59e0b;">
+        <h3>⚠️ ${data.equipos_con_problemas} equipo(s) con P95 ≥ MAXIMO</h3><ul>`;
+      data.resultados.forEach((r: any) => {
+        html += `<li><span class="err-equipo">${r.equipo}</span>: ${r.alertas.length} fecha(s) — `;
+        html += r.alertas.slice(0, 3).map((a: any) => `${a.fecha}`).join(', ');
+        if (r.alertas.length > 3) html += ` (+${r.alertas.length - 3} más)`;
+        html += `</li>`;
+      });
+      html += `</ul><button id="fixP95Btn" class="fix-btn">🔧 Corregir todos (P95 = MAX × 0.85)</button></div>`;
+      validateAllResults.innerHTML = html;
+
+      // Bind fix button
+      document.getElementById('fixP95Btn')?.addEventListener('click', async () => {
+        const fixBtn = document.getElementById('fixP95Btn') as HTMLButtonElement;
+        fixBtn.disabled = true;
+        fixBtn.textContent = 'Corrigiendo...';
+        try {
+          const fixRes = await fetch(`${API}/api/corregir-p95-todos`, { method: 'POST' });
+          const fixData = await fixRes.json();
+          validateAllResults.innerHTML = `
+            <div class="error-box" style="border-color: #10b981;">
+              <h3>✅ ${fixData.message}</h3>
+              <ul>${fixData.detalle.map((d: any) => `<li><span class="err-equipo">${d.equipo}</span>: ${d.fechas_corregidas} fecha(s) corregidas</li>`).join('')}</ul>
+            </div>`;
+          // Refrescar gráfico si hay equipo seleccionado
+          if (equipoSelect.value) await dibujarGrafico(equipoSelect.value);
+        } catch {
+          fixBtn.disabled = false;
+          fixBtn.textContent = '🔧 Corregir todos (P95 = MAX × 0.85)';
+        }
+      });
+    }
+  } catch {
+    validateAllResults.innerHTML = '<div class="error-box"><h3>Error al validar</h3></div>';
+  }
+
+  validateAllBtn.disabled = false;
+  validateAllBtn.textContent = '🔍 Validar P95 vs MAX (todos los equipos)';
+});
+
+// --- Init ---
+cargarArchivos();
+cargarCsvArchivos();
+cargarEquipos();
+</script>
+
+<style>
+  .container { max-width: 1100px; margin: 0 auto; padding: 2rem; }
+  h1 { font-size: 2rem; margin-bottom: 2rem; text-align: center; }
+  h2 { font-size: 1.2rem; margin-bottom: 1rem; color: #94a3b8; }
+  .upload-section { background: #1e293b; padding: 1.5rem; border-radius: 12px; margin-bottom: 2rem; }
+  .bq-section { border: 1px solid #6366f1; }
+  .bq-section h2 { color: #a5b4fc; }
+  .hist-section { border: 1px solid #10b981; }
+  .hist-section h2 { color: #6ee7b7; }
+  .reimport-section { border: 1px solid #f59e0b; }
+  .reimport-section h2 { color: #fcd34d; }
+  .completar-section { border: 1px solid #8b5cf6; }
+  .completar-section h2 { color: #c4b5fd; }
+  .completar-section textarea {
+    background: #0f172a; color: #e2e8f0; border: 1px solid #334155;
+    padding: 0.5rem 1rem; border-radius: 8px; font-size: 0.9rem; width: 100%;
+    resize: vertical; font-family: monospace;
+  }
+  .clear-btn { background: #64748b; }
+  .clear-btn:hover { background: #475569; }
+  .file-item {
+    display: flex; justify-content: space-between; align-items: center;
+    background: #0f172a; padding: 0.6rem 1rem; border-radius: 8px; margin-bottom: 0.5rem;
+  }
+  .file-name { color: #e2e8f0; font-size: 0.95rem; }
+  .delete-btn {
+    background: #ef4444; color: white; border: none; padding: 0.3rem 0.8rem;
+    border-radius: 6px; cursor: pointer; font-size: 0.85rem;
+  }
+  .delete-btn:hover { background: #dc2626; }
+  .no-files { color: #64748b; font-style: italic; margin-bottom: 0.5rem; }
+  form { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; margin-top: 1rem; }
+  input[type="file"] { color: #e2e8f0; }
+  input[type="text"] {
+    background: #0f172a; color: #e2e8f0; border: 1px solid #334155;
+    padding: 0.5rem 1rem; border-radius: 8px; font-size: 0.95rem; width: 160px;
+  }
+  input[type="text"]::placeholder { color: #64748b; }
+  button { background: #3b82f6; color: white; border: none; padding: 0.6rem 1.5rem; border-radius: 8px; cursor: pointer; font-size: 0.95rem; }
+  button:hover { background: #2563eb; }
+  button:disabled { background: #475569; cursor: wait; }
+  #uploadStatus { margin-top: 0.75rem; color: #94a3b8; font-size: 0.9rem; }
+  .chart-section { background: #1e293b; padding: 1.5rem; border-radius: 12px; }
+  .controls { display: flex; gap: 1rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; }
+  select { background: #0f172a; color: #e2e8f0; border: 1px solid #334155; padding: 0.5rem 1rem; border-radius: 8px; font-size: 0.95rem; min-width: 250px; }
+  #exportAllBtn { background: #10b981; }
+  #exportAllBtn:hover { background: #059669; }
+  .trend-btn { background: #8b5cf6; font-size: 0.85rem; padding: 0.5rem 1rem; }
+  .trend-btn:hover { background: #7c3aed; }
+  .save-btn { background: #ef4444; display: none; }
+  .save-btn:hover { background: #dc2626; }
+  .zero-btn { background: #64748b; font-size: 0.85rem; padding: 0.5rem 1rem; }
+  .zero-btn:hover { background: #475569; }
+  .validate-btn { background: #0ea5e9; font-size: 0.85rem; padding: 0.5rem 1rem; }
+  .validate-btn:hover { background: #0284c7; }
+  .validate-all-section { margin-top: 1.5rem; }
+  .validate-all-btn { background: #0ea5e9; width: 100%; padding: 0.75rem; font-size: 1rem; }
+  .validate-all-btn:hover { background: #0284c7; }
+  .fix-btn { background: #f59e0b; color: #0f172a; font-weight: 600; margin-top: 0.75rem; }
+  .fix-btn:hover { background: #d97706; }
+  .drag-hint { color: #64748b; font-size: 0.85rem; font-style: italic; margin-bottom: 0.5rem; }
+  .chart-wrapper { position: relative; height: 450px; }
+  .error-box {
+    margin-top: 1.5rem; background: #1a1a2e; border: 1px solid #ef4444; border-radius: 10px; padding: 1rem 1.5rem;
+  }
+  .error-box h3 { color: #fbbf24; font-size: 1rem; margin-bottom: 0.5rem; }
+  .error-box ul { list-style: none; padding: 0; }
+  .error-box li { color: #94a3b8; font-size: 0.9rem; padding: 0.25rem 0; }
+  .err-equipo { color: #f87171; font-weight: 600; }
+  #outlierSection {
+    margin-top: 1.5rem; background: #1a1a2e; border: 1px solid #fbbf24;
+    border-radius: 10px; padding: 1rem 1.5rem;
+  }
+  #outlierSection h3 { color: #fbbf24; font-size: 1rem; margin-bottom: 0.3rem; }
+  .outlier-hint { color: #64748b; font-size: 0.85rem; margin-bottom: 0.75rem; }
+  .outlier-item {
+    display: inline-flex; align-items: center; gap: 0.4rem;
+    background: #0f172a; padding: 0.4rem 0.8rem; border-radius: 6px;
+    margin: 0.2rem; color: #e2e8f0; font-size: 0.9rem; cursor: pointer;
+  }
+  .outlier-item input { accent-color: #f97316; }
+  #recalcSinOutliersBtn {
+    margin-top: 0.75rem; background: #f59e0b; color: #0f172a; font-weight: 600;
+  }
+  #recalcSinOutliersBtn:hover { background: #d97706; }
+</style>

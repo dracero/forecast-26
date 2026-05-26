@@ -1,0 +1,25 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+node_modules
+
+# Datos procesados (se generan en runtime)
+contenidos/
+_tmp/
+test/
+listos/
+lightning_logs/
+
+# IDE
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
