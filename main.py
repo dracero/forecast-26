@@ -671,7 +671,7 @@ def recalcular_sin_outliers(carpeta_test, carpeta_listos, equipo, fechas_excluid
     }
 
 
-def procesar_csv_historico(ruta_csv, carpeta_test, carpeta_listos, fecha_limite='2028-03-01'):
+def procesar_csv_historico(ruta_csv, carpeta_test, carpeta_listos, fecha_limite='2028-03-01', modelo='neuralprophet'):
     """
     Procesa un CSV con formato de histórico de proveedores:
       - mes → Fecha (primer día del mes)
@@ -782,18 +782,58 @@ def procesar_csv_historico(ruta_csv, carpeta_test, carpeta_listos, fecha_limite=
             continue
 
         try:
-            m = NeuralProphet(
-                yearly_seasonality=True,
-                weekly_seasonality=False,
-                daily_seasonality=False,
-                learning_rate=0.1,
-            )
-            m.fit(df_train, freq='MS')
-            future = m.make_future_dataframe(df_train, periods=meses)
-            forecast = m.predict(future)
+            if modelo == 'neuralprophet':
+                m = NeuralProphet(
+                    yearly_seasonality=True,
+                    weekly_seasonality=False,
+                    daily_seasonality=False,
+                    learning_rate=0.1,
+                )
+                m.fit(df_train, freq='MS')
+                future = m.make_future_dataframe(df_train, periods=meses)
+                forecast = m.predict(future)
+
+                forecast_futuro = forecast[forecast['ds'] >= ultima][['ds', 'yhat1']].copy()
+                forecast_futuro.columns = ['ds', 'y']
+                ultimo_valor_real = df_train[df_train['ds'] == ultima]['y'].iloc[0]
+                forecast_futuro.loc[forecast_futuro['ds'] == ultima, 'y'] = ultimo_valor_real
+            else:
+                # PyCaret
+                from pycaret.time_series import TSForecastingExperiment
+                df_pycaret = df_train[['ds', 'y']].set_index('ds').copy()
+                df_pycaret.index.freq = 'MS'
+
+                # Ajustar fh y fold según datos disponibles
+                n_datos = len(df_pycaret)
+                fh_usar = min(meses, max(1, n_datos // 3))
+                fold_usar = max(1, min(2, n_datos - fh_usar - 1))
+
+                exp = TSForecastingExperiment()
+                exp.setup(data=df_pycaret, fh=fh_usar, fold=fold_usar, session_id=42, verbose=False)
+
+                if modelo == 'auto':
+                    best = exp.compare_models(verbose=False)
+                elif modelo == 'ets':
+                    best = exp.create_model('exp_smooth', verbose=False)
+                elif modelo == 'theta':
+                    best = exp.create_model('theta', verbose=False)
+                else:  # arima
+                    best = exp.create_model('arima', verbose=False)
+
+                # Predecir todos los meses necesarios
+                final_model = exp.finalize_model(best)
+                predictions = exp.predict_model(final_model, fh=meses)
+                forecast_values = predictions['y_pred'].values
+
+                fechas_futuras = pd.date_range(start=ultima, periods=meses + 1, freq='MS')
+                forecast_futuro = pd.DataFrame({
+                    'ds': fechas_futuras,
+                    'y': [df_train[df_train['ds'] == ultima]['y'].iloc[0]] + list(forecast_values[:meses]),
+                })
+
         except Exception as e:
             msg = str(e)[:120]
-            print(f"  Error NeuralProphet: {msg}")
+            print(f"  Error {modelo}: {msg}")
             errores.append({"equipo": nombre_clave, "motivo": msg})
             continue
 
@@ -801,14 +841,7 @@ def procesar_csv_historico(ruta_csv, carpeta_test, carpeta_listos, fecha_limite=
         hist_out['ds'] = hist_out['ds'].dt.strftime('%Y-%m-%d %H:%M:%S')
         hist_out['tipo'] = 'historico'
 
-        # El forecast incluye desde el último mes histórico (inclusive)
-        # El último mes aparece como historico Y como forecast con el mismo valor
-        forecast_futuro = forecast[forecast['ds'] >= ultima][['ds', 'yhat1']].copy()
-        forecast_futuro.columns = ['ds', 'y']
-        # Reemplazar el valor del último mes con el valor real histórico
-        ultimo_valor_real = df_train[df_train['ds'] == ultima]['y'].iloc[0]
-        forecast_futuro.loc[forecast_futuro['ds'] == ultima, 'y'] = ultimo_valor_real
-        forecast_futuro['ds'] = forecast_futuro['ds'].dt.strftime('%Y-%m-%d %H:%M:%S')
+        forecast_futuro['ds'] = pd.to_datetime(forecast_futuro['ds']).dt.strftime('%Y-%m-%d %H:%M:%S')
         forecast_futuro['tipo'] = 'forecast'
 
         resultado = pd.concat([hist_out, forecast_futuro], ignore_index=True)
@@ -928,3 +961,109 @@ def forecast_iterativo(carpeta_test, carpeta_listos, equipo, fecha_limite='2028-
         "message": f"Forecast iterativo generado para {equipo}: {len(forecast_out)} meses",
         "equipo": equipo,
     }
+
+
+def ejecutar_forecast_pycaret(carpeta_test, carpeta_listos, fecha_limite='2028-03-01', modelo='arima'):
+    """
+    Ejecuta forecast usando PyCaret Time Series.
+    Modelos disponibles: 'arima', 'ets', 'theta', 'auto' (compara y elige el mejor).
+    """
+    from pycaret.time_series import TSForecastingExperiment
+
+    fecha_limite_ts = pd.Timestamp(fecha_limite)
+    archivos = glob.glob(os.path.join(carpeta_test, "*.csv"))
+    errores = []
+
+    if not archivos:
+        print("No se encontraron archivos CSV en la carpeta 'test'.")
+        return errores
+
+    print(f"Ejecutando forecast PyCaret ({modelo}) para {len(archivos)} equipo(s)...\n")
+
+    for ruta_csv in archivos:
+        nombre = os.path.basename(ruta_csv)
+        equipo = nombre.replace('.csv', '')
+        print(f"--- {equipo} ---")
+
+        df = pd.read_csv(ruta_csv)
+        df['ds'] = pd.to_datetime(df['ds'])
+        df = df.sort_values('ds').reset_index(drop=True)
+        df['ds'] = df['ds'].dt.to_period('M').dt.to_timestamp()
+
+        ultima = df['ds'].max()
+        meses = (fecha_limite_ts.year - ultima.year) * 12 + (fecha_limite_ts.month - ultima.month)
+
+        if meses <= 0:
+            msg = f"Ya tiene datos hasta {ultima.strftime('%Y-%m-%d')}"
+            print(f"  {msg}, saltando.")
+            errores.append({"equipo": equipo, "motivo": msg})
+            continue
+
+        if len(df) < 3:
+            msg = f"Solo {len(df)} datos (mínimo 3 para PyCaret)"
+            print(f"  Saltando: {msg}.")
+            errores.append({"equipo": equipo, "motivo": msg})
+            continue
+
+        if df['y'].nunique() <= 1:
+            msg = "Valores sin variación"
+            print(f"  Saltando: {msg}.")
+            errores.append({"equipo": equipo, "motivo": msg})
+            continue
+
+        try:
+            # Preparar datos para PyCaret (necesita DatetimeIndex)
+            df_pycaret = df[['ds', 'y']].copy()
+            df_pycaret = df_pycaret.set_index('ds')
+            df_pycaret.index.freq = 'MS'
+
+            # Ajustar fh y fold según datos disponibles
+            n_datos = len(df_pycaret)
+            fh_usar = min(meses, max(1, n_datos // 3))
+            fold_usar = max(1, min(2, n_datos - fh_usar - 1))
+
+            exp = TSForecastingExperiment()
+            exp.setup(data=df_pycaret, fh=fh_usar, fold=fold_usar, session_id=42, verbose=False)
+
+            if modelo == 'auto':
+                best = exp.compare_models(verbose=False)
+            elif modelo == 'arima':
+                best = exp.create_model('arima', verbose=False)
+            elif modelo == 'ets':
+                best = exp.create_model('exp_smooth', verbose=False)
+            elif modelo == 'theta':
+                best = exp.create_model('theta', verbose=False)
+            else:
+                best = exp.create_model('arima', verbose=False)
+
+            final_model = exp.finalize_model(best)
+            predictions = exp.predict_model(final_model, fh=meses)
+            forecast_values = predictions['y_pred'].values
+
+        except Exception as e:
+            msg = str(e)[:120]
+            print(f"  Error PyCaret: {msg}. Saltando.")
+            errores.append({"equipo": equipo, "motivo": msg})
+            continue
+
+        # Construir resultado
+        historico = df.copy()
+        historico['ds'] = historico['ds'].dt.strftime('%Y-%m-%d %H:%M:%S')
+        historico['tipo'] = 'historico'
+
+        fechas_futuras = pd.date_range(start=ultima + pd.DateOffset(months=1), periods=meses, freq='MS')
+        forecast_df = pd.DataFrame({
+            'ds': fechas_futuras.strftime('%Y-%m-%d %H:%M:%S'),
+            'y': forecast_values[:meses],
+        })
+        forecast_df['tipo'] = 'forecast'
+
+        resultado = pd.concat([historico, forecast_df], ignore_index=True)
+
+        nombre_salida = f"frcst_{equipo}.csv"
+        ruta_salida = os.path.join(carpeta_listos, nombre_salida)
+        resultado.to_csv(ruta_salida, index=False)
+        print(f"  Guardado: {nombre_salida} ({meses} meses)")
+
+    print(f"\nForecasts PyCaret completados. {len(errores)} equipo(s) con problemas.")
+    return errores

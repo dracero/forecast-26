@@ -7,7 +7,7 @@ import shutil
 import pandas as pd
 from openpyxl import load_workbook
 
-from main import procesar_excel, convertir_a_prophet, ejecutar_forecast, recalcular_equipo, detectar_outliers, recalcular_sin_outliers, procesar_csv_bigquery, procesar_csv_historico, forecast_iterativo
+from main import procesar_excel, convertir_a_prophet, ejecutar_forecast, recalcular_equipo, detectar_outliers, recalcular_sin_outliers, procesar_csv_bigquery, procesar_csv_historico, forecast_iterativo, ejecutar_forecast_pycaret
 
 app = FastAPI()
 
@@ -51,7 +51,7 @@ def parsear_nombre_equipo(equipo: str):
             return equipo.replace('_', ' '), '', 'MAXIMO'
 
 @app.post("/api/upload")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(file: UploadFile = File(...), modelo: str = Form("neuralprophet")):
     """Sube un archivo .xlsx a contenidos/ y ejecuta el pipeline completo."""
     if not file.filename.endswith(".xlsx"):
         return JSONResponse(status_code=400, content={"error": "Solo se aceptan archivos .xlsx"})
@@ -70,10 +70,13 @@ async def upload_file(file: UploadFile = File(...)):
     convertir_a_prophet(ruta, TEST)
 
     # Paso 3: Forecast -> listos/
-    errores = ejecutar_forecast(TEST, LISTOS, fecha_limite="2028-03-01")
+    if modelo == 'neuralprophet':
+        errores = ejecutar_forecast(TEST, LISTOS, fecha_limite="2028-03-01")
+    else:
+        errores = ejecutar_forecast_pycaret(TEST, LISTOS, fecha_limite="2028-03-01", modelo=modelo)
 
     return {
-        "message": f"Archivo '{file.filename}' procesado correctamente.",
+        "message": f"Archivo '{file.filename}' procesado con {modelo}.",
         "errores": errores or [],
     }
 
@@ -88,7 +91,7 @@ def listar_equipos():
 
 
 @app.post("/api/upload-bq-csv")
-async def upload_bq_csv(file: UploadFile = File(...), rol: str = Form("CDN")):
+async def upload_bq_csv(file: UploadFile = File(...), rol: str = Form("CDN"), modelo: str = Form("neuralprophet")):
     """
     Sube un CSV con formato BigQuery y lo procesa.
     Columnas esperadas: id_enlace, time_series_timestamp, time_series_type, time_series_adjusted_data
@@ -361,10 +364,10 @@ async def completar_forecast(file: UploadFile = File(...), equipos: str = Form("
 
 
 @app.post("/api/upload-historico-csv")
-async def upload_historico_csv(file: UploadFile = File(...)):
+async def upload_historico_csv(file: UploadFile = File(...), modelo: str = Form("neuralprophet")):
     """
     Sube un CSV con formato de histórico de proveedores y ejecuta forecast.
-    Columnas esperadas: mes, fecha_max, ProovedorNombre, Capa, max_mbps
+    Columnas esperadas: mes, proveedor, capa, max_mbps
     """
     if not file.filename.endswith(".csv"):
         return JSONResponse(status_code=400, content={"error": "Solo se aceptan archivos .csv"})
@@ -373,13 +376,13 @@ async def upload_historico_csv(file: UploadFile = File(...)):
     with open(ruta_csv, "wb") as f:
         f.write(await file.read())
 
-    resultado = procesar_csv_historico(ruta_csv, TEST, LISTOS, fecha_limite="2028-03-01")
+    resultado = procesar_csv_historico(ruta_csv, TEST, LISTOS, fecha_limite="2028-03-01", modelo=modelo)
 
     if "error" in resultado:
         return JSONResponse(status_code=400, content=resultado)
 
     return {
-        "message": f"CSV '{file.filename}' procesado. {len(resultado['equipos'])} equipo(s) cargados.",
+        "message": f"CSV '{file.filename}' procesado con {modelo}. {len(resultado['equipos'])} equipo(s) cargados.",
         "equipos": resultado["equipos"],
         "errores": resultado.get("errores", []),
     }

@@ -5,6 +5,17 @@ import Layout from '../layouts/Layout.astro';
   <div class="container">
     <h1>📈 Forecaster</h1>
 
+    <section class="upload-section model-section">
+      <h2>⚙️ Modelo de Forecast</h2>
+      <select id="modelSelect">
+        <option value="neuralprophet">NeuralProphet</option>
+        <option value="arima">ARIMA (PyCaret)</option>
+        <option value="ets">ETS - Exponential Smoothing (PyCaret)</option>
+        <option value="theta">Theta (PyCaret)</option>
+        <option value="auto">Auto - Mejor modelo (PyCaret)</option>
+      </select>
+    </section>
+
     <section class="upload-section">
       <h2>Archivo Excel</h2>
       <div id="fileList"></div>
@@ -94,6 +105,7 @@ import Layout from '../layouts/Layout.astro';
 <script>
 const API = 'http://localhost:8000';
 
+const modelSelect = document.getElementById('modelSelect') as HTMLSelectElement;
 const uploadForm = document.getElementById('uploadForm') as HTMLFormElement;
 const fileInput = document.getElementById('fileInput') as HTMLInputElement;
 const uploadBtn = document.getElementById('uploadBtn') as HTMLButtonElement;
@@ -419,6 +431,7 @@ uploadForm.addEventListener('submit', async (e) => {
 
   const formData = new FormData();
   formData.append('file', file);
+  formData.append('modelo', modelSelect.value);
 
   try {
     const res = await fetch(`${API}/api/upload`, { method: 'POST', body: formData });
@@ -468,6 +481,7 @@ bqUploadForm.addEventListener('submit', async (e) => {
   const formData = new FormData();
   formData.append('file', file);
   formData.append('rol', rol);
+  formData.append('modelo', modelSelect.value);
 
   try {
     const res = await fetch(`${API}/api/upload-bq-csv`, { method: 'POST', body: formData });
@@ -609,6 +623,7 @@ histUploadForm.addEventListener('submit', async (e) => {
 
   const formData = new FormData();
   formData.append('file', file);
+  formData.append('modelo', modelSelect.value);
 
   try {
     const res = await fetch(`${API}/api/upload-historico-csv`, { method: 'POST', body: formData });
@@ -835,6 +850,9 @@ cargarEquipos();
   .upload-section { background: #1e293b; padding: 1.5rem; border-radius: 12px; margin-bottom: 2rem; }
   .bq-section { border: 1px solid #6366f1; }
   .bq-section h2 { color: #a5b4fc; }
+  .model-section { border: 1px solid #94a3b8; }
+  .model-section h2 { color: #e2e8f0; }
+  .model-section select { width: 100%; margin-top: 0.5rem; }
   .hist-section { border: 1px solid #10b981; }
   .hist-section h2 { color: #6ee7b7; }
   .reimport-section { border: 1px solid #f59e0b; }
