@@ -567,6 +567,57 @@ def procesar_csv_bigquery(ruta_csv, rol, carpeta_test, carpeta_listos, fecha_lim
     }
 
 
+def ajustar_pendiente_historica(carpeta_test, carpeta_listos, equipo, invertir=False):
+    """
+    Ajusta el forecast para que su pendiente coincida con la pendiente de
+    crecimiento lineal del histórico del equipo.
+    Si invertir=True, aplica la pendiente con signo opuesto.
+    """
+    ruta_frcst = os.path.join(carpeta_listos, f"frcst_{equipo}.csv")
+    ruta_test = os.path.join(carpeta_test, f"{equipo}.csv")
+
+    if not os.path.exists(ruta_frcst):
+        return {"error": f"No se encontró forecast para '{equipo}'"}
+    if not os.path.exists(ruta_test):
+        return {"error": f"No se encontró histórico para '{equipo}'"}
+
+    df_frcst = pd.read_csv(ruta_frcst)
+    df_hist = pd.read_csv(ruta_test)
+
+    historico = df_frcst[df_frcst['tipo'] == 'historico'].copy()
+    futuro = df_frcst[df_frcst['tipo'] == 'forecast'].copy()
+
+    if futuro.empty:
+        return {"error": "No hay datos de forecast para ajustar"}
+    if len(historico) < 2:
+        return {"error": "Se necesitan al menos 2 puntos históricos para calcular la pendiente"}
+
+    # Calcular pendiente de regresión lineal sobre el histórico
+    x = np.arange(len(historico))
+    y = historico['y'].astype(float).values
+    pendiente, intercepto = np.polyfit(x, y, 1)
+
+    if invertir:
+        pendiente = -pendiente
+
+    # Valor base: último punto histórico
+    ultimo_valor = float(historico['y'].iloc[-1])
+
+    # Aplicar la pendiente al forecast: cada mes suma la pendiente calculada
+    futuro = futuro.copy().reset_index(drop=True)
+    futuro['y'] = [round(ultimo_valor + pendiente * (i + 1), 2) for i in range(len(futuro))]
+
+    resultado = pd.concat([historico, futuro], ignore_index=True)
+    resultado.to_csv(ruta_frcst, index=False)
+
+    signo_txt = "invertida" if invertir else "original"
+    return {
+        "message": f"Pendiente histórica ({signo_txt}) aplicada a '{equipo}'. Pendiente: {round(pendiente, 2)}/mes",
+        "pendiente": round(pendiente, 2),
+        "invertida": invertir,
+    }
+
+
 def detectar_outliers(carpeta_test, equipo):
     """
     Detecta outliers en la serie histórica usando IQR.
@@ -797,6 +848,58 @@ def procesar_csv_historico(ruta_csv, carpeta_test, carpeta_listos, fecha_limite=
                 forecast_futuro.columns = ['ds', 'y']
                 ultimo_valor_real = df_train[df_train['ds'] == ultima]['y'].iloc[0]
                 forecast_futuro.loc[forecast_futuro['ds'] == ultima, 'y'] = ultimo_valor_real
+            elif modelo == 'prophet':
+                from prophet import Prophet
+                import logging
+                logging.getLogger('prophet').setLevel(logging.WARNING)
+                logging.getLogger('cmdstanpy').setLevel(logging.WARNING)
+
+                m = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
+                m.fit(df_train[['ds', 'y']])
+                future = m.make_future_dataframe(periods=meses, freq='MS')
+                forecast = m.predict(future)
+
+                forecast_futuro = forecast[forecast['ds'] >= ultima][['ds', 'yhat']].copy()
+                forecast_futuro.columns = ['ds', 'y']
+                forecast_futuro['y'] = forecast_futuro['y'].clip(lower=0)
+                ultimo_valor_real = df_train[df_train['ds'] == ultima]['y'].iloc[0]
+                forecast_futuro.loc[forecast_futuro['ds'] == ultima, 'y'] = ultimo_valor_real
+            elif modelo == 'statsforecast':
+                from statsforecast import StatsForecast as SF
+                from statsforecast.models import AutoARIMA, AutoETS, AutoTheta
+
+                df_sf = df_train[['ds', 'y']].copy()
+                df_sf['unique_id'] = nombre_clave
+                n_datos = len(df_sf)
+
+                if n_datos >= 12:
+                    models = [AutoARIMA(season_length=12), AutoETS(season_length=12), AutoTheta(season_length=12)]
+                elif n_datos >= 6:
+                    models = [AutoARIMA(), AutoETS(), AutoTheta()]
+                else:
+                    models = [AutoARIMA(), AutoETS()]
+
+                sf = SF(models=models, freq='MS', n_jobs=1)
+                sf.fit(df_sf)
+                forecast_result = sf.predict(h=meses).reset_index()
+
+                pred_cols = [c for c in forecast_result.columns if c not in ['unique_id', 'ds']]
+                best_col = pred_cols[0]
+                for col in pred_cols:
+                    if not forecast_result[col].isna().any():
+                        best_col = col
+                        break
+
+                forecast_values = forecast_result[best_col].values
+                fechas_futuras = pd.date_range(start=ultima, periods=meses + 1, freq='MS')
+                ultimo_valor_real = df_train[df_train['ds'] == ultima]['y'].iloc[0]
+                # Piso: no permitir que caiga por debajo del 30% del promedio de los últimos 6 meses
+                piso = df_train['y'].tail(min(6, len(df_train))).mean() * 0.3
+                forecast_futuro = pd.DataFrame({
+                    'ds': fechas_futuras,
+                    'y': [ultimo_valor_real] + [max(piso, round(v, 2)) for v in forecast_values[:meses]],
+                })
+                print(f"  Mejor modelo: {best_col}")
             else:
                 # PyCaret
                 from pycaret.time_series import TSForecastingExperiment
@@ -805,11 +908,12 @@ def procesar_csv_historico(ruta_csv, carpeta_test, carpeta_listos, fecha_limite=
 
                 # Ajustar fh y fold según datos disponibles
                 n_datos = len(df_pycaret)
-                fh_usar = min(meses, max(1, n_datos // 3))
-                fold_usar = max(1, min(2, n_datos - fh_usar - 1))
+                # Setup con fh pequeño para cross-validation, luego predecir todo
+                fh_setup = min(3, max(1, n_datos // 6))
+                fold_usar = min(3, max(2, (n_datos - fh_setup) // fh_setup - 1))
 
                 exp = TSForecastingExperiment()
-                exp.setup(data=df_pycaret, fh=fh_usar, fold=fold_usar, session_id=42, verbose=False)
+                exp.setup(data=df_pycaret, fh=fh_setup, fold=fold_usar, session_id=42, verbose=False)
 
                 if modelo == 'auto':
                     best = exp.compare_models(verbose=False)
@@ -1014,13 +1118,26 @@ def ejecutar_forecast_pycaret(carpeta_test, carpeta_listos, fecha_limite='2028-0
         try:
             # Preparar datos para PyCaret (necesita DatetimeIndex)
             df_pycaret = df[['ds', 'y']].copy()
+            # Eliminar NaN antes de entrenar
+            df_pycaret = df_pycaret.dropna(subset=['y'])
             df_pycaret = df_pycaret.set_index('ds')
             df_pycaret.index.freq = 'MS'
 
-            # Ajustar fh y fold según datos disponibles
             n_datos = len(df_pycaret)
-            fh_usar = min(meses, max(1, n_datos // 3))
-            fold_usar = max(1, min(2, n_datos - fh_usar - 1))
+
+            if n_datos < 3:
+                msg = f"Solo {n_datos} datos válidos (sin NaN) para PyCaret"
+                print(f"  Saltando: {msg}.")
+                errores.append({"equipo": equipo, "motivo": msg})
+                continue
+
+            # Ajustar fh y fold según datos disponibles.
+            # PyCaret necesita al menos: fh * (fold + 1) + fh puntos.
+            # Usamos fh=1 para el entrenamiento interno y predecimos meses al final.
+            fh_usar = 1
+            # fold máximo que permite la serie: (n_datos - fh_usar) // (fh_usar + 1)
+            fold_max = max(2, (n_datos - fh_usar) // (fh_usar + 1))
+            fold_usar = min(3, fold_max)
 
             exp = TSForecastingExperiment()
             exp.setup(data=df_pycaret, fh=fh_usar, fold=fold_usar, session_id=42, verbose=False)
@@ -1066,4 +1183,204 @@ def ejecutar_forecast_pycaret(carpeta_test, carpeta_listos, fecha_limite='2028-0
         print(f"  Guardado: {nombre_salida} ({meses} meses)")
 
     print(f"\nForecasts PyCaret completados. {len(errores)} equipo(s) con problemas.")
+    return errores
+
+
+def ejecutar_forecast_prophet(carpeta_test, carpeta_listos, fecha_limite='2028-03-01'):
+    """
+    Ejecuta forecast usando Prophet (Facebook/Meta).
+    Funciona con mínimo 2 datos y no requiere cross-validation.
+    """
+    from prophet import Prophet
+    import logging
+    logging.getLogger('prophet').setLevel(logging.WARNING)
+    logging.getLogger('cmdstanpy').setLevel(logging.WARNING)
+
+    fecha_limite_ts = pd.Timestamp(fecha_limite)
+    archivos = glob.glob(os.path.join(carpeta_test, "*.csv"))
+    errores = []
+
+    if not archivos:
+        print("No se encontraron archivos CSV en la carpeta 'test'.")
+        return errores
+
+    print(f"Ejecutando forecast Prophet para {len(archivos)} equipo(s)...\n")
+
+    for ruta_csv in archivos:
+        nombre = os.path.basename(ruta_csv)
+        equipo = nombre.replace('.csv', '')
+        print(f"--- {equipo} ---")
+
+        df = pd.read_csv(ruta_csv)
+        df['ds'] = pd.to_datetime(df['ds'])
+        df = df.sort_values('ds').reset_index(drop=True)
+        df['ds'] = df['ds'].dt.to_period('M').dt.to_timestamp()
+
+        ultima = df['ds'].max()
+        meses = (fecha_limite_ts.year - ultima.year) * 12 + (fecha_limite_ts.month - ultima.month)
+
+        if meses <= 0:
+            msg = f"Ya tiene datos hasta {ultima.strftime('%Y-%m-%d')}"
+            print(f"  {msg}, saltando.")
+            errores.append({"equipo": equipo, "motivo": msg})
+            continue
+
+        if len(df) < 2:
+            msg = f"Solo {len(df)} dato(s) (mínimo 2)"
+            print(f"  Saltando: {msg}.")
+            errores.append({"equipo": equipo, "motivo": msg})
+            continue
+
+        if df['y'].nunique() <= 1:
+            msg = "Valores sin variación"
+            print(f"  Saltando: {msg}.")
+            errores.append({"equipo": equipo, "motivo": msg})
+            continue
+
+        try:
+            m = Prophet(
+                yearly_seasonality=True,
+                weekly_seasonality=False,
+                daily_seasonality=False,
+            )
+            m.fit(df[['ds', 'y']])
+
+            future = m.make_future_dataframe(periods=meses, freq='MS')
+            forecast = m.predict(future)
+        except Exception as e:
+            msg = str(e)[:120]
+            print(f"  Error Prophet: {msg}. Saltando.")
+            errores.append({"equipo": equipo, "motivo": msg})
+            continue
+
+        historico = df.copy()
+        historico['ds'] = historico['ds'].dt.strftime('%Y-%m-%d %H:%M:%S')
+        historico['tipo'] = 'historico'
+
+        forecast_futuro = forecast[forecast['ds'] > ultima][['ds', 'yhat']].copy()
+        forecast_futuro.columns = ['ds', 'y']
+        forecast_futuro['y'] = forecast_futuro['y'].clip(lower=0).round(2)
+        forecast_futuro['ds'] = forecast_futuro['ds'].dt.strftime('%Y-%m-%d %H:%M:%S')
+        forecast_futuro['tipo'] = 'forecast'
+
+        resultado = pd.concat([historico, forecast_futuro], ignore_index=True)
+
+        nombre_salida = f"frcst_{equipo}.csv"
+        ruta_salida = os.path.join(carpeta_listos, nombre_salida)
+        resultado.to_csv(ruta_salida, index=False)
+        print(f"  Guardado: {nombre_salida} ({meses} meses)")
+
+    print(f"\nForecasts Prophet completados. {len(errores)} equipo(s) con problemas.")
+    return errores
+
+
+def ejecutar_forecast_statsforecast(carpeta_test, carpeta_listos, fecha_limite='2028-03-01'):
+    """
+    Ejecuta forecast usando StatsForecast (Nixtla).
+    Usa AutoARIMA + AutoETS y elige el mejor automáticamente.
+    Muy rápido y funciona con mínimo 2 datos.
+    """
+    from statsforecast import StatsForecast
+    from statsforecast.models import AutoARIMA, AutoETS, AutoTheta
+
+    fecha_limite_ts = pd.Timestamp(fecha_limite)
+    archivos = glob.glob(os.path.join(carpeta_test, "*.csv"))
+    errores = []
+
+    if not archivos:
+        print("No se encontraron archivos CSV en la carpeta 'test'.")
+        return errores
+
+    print(f"Ejecutando forecast StatsForecast para {len(archivos)} equipo(s)...\n")
+
+    for ruta_csv in archivos:
+        nombre = os.path.basename(ruta_csv)
+        equipo = nombre.replace('.csv', '')
+        print(f"--- {equipo} ---")
+
+        df = pd.read_csv(ruta_csv)
+        df['ds'] = pd.to_datetime(df['ds'])
+        df = df.sort_values('ds').reset_index(drop=True)
+        df['ds'] = df['ds'].dt.to_period('M').dt.to_timestamp()
+
+        ultima = df['ds'].max()
+        meses = (fecha_limite_ts.year - ultima.year) * 12 + (fecha_limite_ts.month - ultima.month)
+
+        if meses <= 0:
+            msg = f"Ya tiene datos hasta {ultima.strftime('%Y-%m-%d')}"
+            print(f"  {msg}, saltando.")
+            errores.append({"equipo": equipo, "motivo": msg})
+            continue
+
+        if len(df) < 2:
+            msg = f"Solo {len(df)} dato(s) (mínimo 2)"
+            print(f"  Saltando: {msg}.")
+            errores.append({"equipo": equipo, "motivo": msg})
+            continue
+
+        if df['y'].nunique() <= 1:
+            msg = "Valores sin variación"
+            print(f"  Saltando: {msg}.")
+            errores.append({"equipo": equipo, "motivo": msg})
+            continue
+
+        try:
+            # Preparar datos en formato StatsForecast (unique_id, ds, y)
+            df_sf = df[['ds', 'y']].copy()
+            df_sf['unique_id'] = equipo
+
+            # Seleccionar modelos según cantidad de datos
+            n_datos = len(df_sf)
+            if n_datos >= 12:
+                models = [AutoARIMA(season_length=12), AutoETS(season_length=12), AutoTheta(season_length=12)]
+            elif n_datos >= 6:
+                models = [AutoARIMA(), AutoETS(), AutoTheta()]
+            else:
+                models = [AutoARIMA(), AutoETS()]
+
+            sf = StatsForecast(models=models, freq='MS', n_jobs=1)
+            sf.fit(df_sf)
+            forecast_result = sf.predict(h=meses)
+
+            # Tomar el mejor modelo (primera columna de predicción disponible)
+            forecast_result = forecast_result.reset_index()
+            # Buscar la columna con mejores valores (no NaN)
+            pred_cols = [c for c in forecast_result.columns if c not in ['unique_id', 'ds']]
+            best_col = pred_cols[0]  # Por defecto AutoARIMA
+            for col in pred_cols:
+                if not forecast_result[col].isna().any():
+                    best_col = col
+                    break
+
+            forecast_values = forecast_result[best_col].values
+            print(f"  Mejor modelo: {best_col}")
+
+        except Exception as e:
+            msg = str(e)[:120]
+            print(f"  Error StatsForecast: {msg}. Saltando.")
+            errores.append({"equipo": equipo, "motivo": msg})
+            continue
+
+        # Construir resultado
+        historico = df.copy()
+        historico['ds'] = historico['ds'].dt.strftime('%Y-%m-%d %H:%M:%S')
+        historico['tipo'] = 'historico'
+
+        # Piso: no permitir que caiga por debajo del 30% del promedio de los últimos 6 meses
+        piso = df['y'].tail(min(6, len(df))).mean() * 0.3
+        fechas_futuras = pd.date_range(start=ultima + pd.DateOffset(months=1), periods=meses, freq='MS')
+        forecast_df = pd.DataFrame({
+            'ds': fechas_futuras.strftime('%Y-%m-%d %H:%M:%S'),
+            'y': [max(piso, round(v, 2)) for v in forecast_values[:meses]],
+        })
+        forecast_df['tipo'] = 'forecast'
+
+        resultado = pd.concat([historico, forecast_df], ignore_index=True)
+
+        nombre_salida = f"frcst_{equipo}.csv"
+        ruta_salida = os.path.join(carpeta_listos, nombre_salida)
+        resultado.to_csv(ruta_salida, index=False)
+        print(f"  Guardado: {nombre_salida} ({meses} meses)")
+
+    print(f"\nForecasts StatsForecast completados. {len(errores)} equipo(s) con problemas.")
     return errores

@@ -9,6 +9,8 @@ import Layout from '../layouts/Layout.astro';
       <h2>⚙️ Modelo de Forecast</h2>
       <select id="modelSelect">
         <option value="neuralprophet">NeuralProphet</option>
+        <option value="prophet">Prophet (Facebook)</option>
+        <option value="statsforecast">StatsForecast (AutoARIMA + ETS)</option>
         <option value="arima">ARIMA (PyCaret)</option>
         <option value="ets">ETS - Exponential Smoothing (PyCaret)</option>
         <option value="theta">Theta (PyCaret)</option>
@@ -77,6 +79,8 @@ import Layout from '../layouts/Layout.astro';
         <button id="exportAllBtn">📥 Exportar Todo a Excel</button>
         <button id="trendDownBtn" class="trend-btn" style="display:none;">📉 Menos pendiente</button>
         <button id="trendUpBtn" class="trend-btn" style="display:none;">📈 Más pendiente</button>
+        <button id="historicTrendBtn" class="historic-trend-btn" style="display:none;">📐 Ajustar a pendiente histórica</button>
+        <button id="historicTrendInvertBtn" class="historic-trend-invert-btn" style="display:none;">🔄 Invertir pendiente histórica</button>
         <button id="zeroBtn" class="zero-btn" style="display:none;">0️⃣ Forecast a cero</button>
         <button id="validateP95Btn" class="validate-btn" style="display:none;">🔍 Validar P95 vs MAX</button>
         <button id="saveBtn" class="save-btn" style="display:none;">💾 Guardar cambios</button>
@@ -135,6 +139,8 @@ const equipoSelect = document.getElementById('equipoSelect') as HTMLSelectElemen
 const exportAllBtn = document.getElementById('exportAllBtn') as HTMLButtonElement;
 const trendDownBtn = document.getElementById('trendDownBtn') as HTMLButtonElement;
 const trendUpBtn = document.getElementById('trendUpBtn') as HTMLButtonElement;
+const historicTrendBtn = document.getElementById('historicTrendBtn') as HTMLButtonElement;
+const historicTrendInvertBtn = document.getElementById('historicTrendInvertBtn') as HTMLButtonElement;
 const zeroBtn = document.getElementById('zeroBtn') as HTMLButtonElement;
 const validateP95Btn = document.getElementById('validateP95Btn') as HTMLButtonElement;
 const canvas = document.getElementById('forecastChart') as HTMLCanvasElement;
@@ -397,6 +403,8 @@ async function dibujarGrafico(equipo: string) {
 
   trendDownBtn.style.display = 'inline-block';
   trendUpBtn.style.display = 'inline-block';
+  historicTrendBtn.style.display = 'inline-block';
+  historicTrendInvertBtn.style.display = 'inline-block';
   zeroBtn.style.display = 'inline-block';
   validateP95Btn.style.display = 'inline-block';
   dragHint.style.display = 'block';
@@ -677,6 +685,33 @@ async function recalcular(ajuste: string) {
 trendDownBtn.addEventListener('click', () => recalcular('mas_baja'));
 trendUpBtn.addEventListener('click', () => recalcular('mas_alta'));
 
+// --- Ajustar a pendiente histórica ---
+async function ajustarPendienteHistorica(invertir: boolean) {
+  const equipo = equipoSelect.value;
+  if (!equipo) return;
+  const btn = invertir ? historicTrendInvertBtn : historicTrendBtn;
+  const textoOriginal = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Ajustando...';
+  try {
+    const res = await fetch(
+      `${API}/api/ajustar-pendiente-historica/${encodeURIComponent(equipo)}?invertir=${invertir}`,
+      { method: 'POST' }
+    );
+    const data = await res.json();
+    if (data.error) {
+      errorListDiv.innerHTML = `<div class="error-box"><h3>❌ ${data.error}</h3></div>`;
+    } else {
+      await dibujarGrafico(equipo);
+    }
+  } catch {}
+  btn.disabled = false;
+  btn.textContent = textoOriginal;
+}
+
+historicTrendBtn.addEventListener('click', () => ajustarPendienteHistorica(false));
+historicTrendInvertBtn.addEventListener('click', () => ajustarPendienteHistorica(true));
+
 // --- Forecast a cero ---
 zeroBtn.addEventListener('click', () => {
   const equipo = equipoSelect.value;
@@ -895,6 +930,10 @@ cargarEquipos();
   #exportAllBtn:hover { background: #059669; }
   .trend-btn { background: #8b5cf6; font-size: 0.85rem; padding: 0.5rem 1rem; }
   .trend-btn:hover { background: #7c3aed; }
+  .historic-trend-btn { background: #0d9488; font-size: 0.85rem; padding: 0.5rem 1rem; }
+  .historic-trend-btn:hover { background: #0f766e; }
+  .historic-trend-invert-btn { background: #b45309; font-size: 0.85rem; padding: 0.5rem 1rem; }
+  .historic-trend-invert-btn:hover { background: #92400e; }
   .save-btn { background: #ef4444; display: none; }
   .save-btn:hover { background: #dc2626; }
   .zero-btn { background: #64748b; font-size: 0.85rem; padding: 0.5rem 1rem; }

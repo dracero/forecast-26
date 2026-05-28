@@ -7,7 +7,7 @@ import shutil
 import pandas as pd
 from openpyxl import load_workbook
 
-from main import procesar_excel, convertir_a_prophet, ejecutar_forecast, recalcular_equipo, detectar_outliers, recalcular_sin_outliers, procesar_csv_bigquery, procesar_csv_historico, forecast_iterativo, ejecutar_forecast_pycaret
+from main import procesar_excel, convertir_a_prophet, ejecutar_forecast, recalcular_equipo, ajustar_pendiente_historica, detectar_outliers, recalcular_sin_outliers, procesar_csv_bigquery, procesar_csv_historico, forecast_iterativo, ejecutar_forecast_pycaret, ejecutar_forecast_prophet, ejecutar_forecast_statsforecast
 
 app = FastAPI()
 
@@ -72,6 +72,10 @@ async def upload_file(file: UploadFile = File(...), modelo: str = Form("neuralpr
     # Paso 3: Forecast -> listos/
     if modelo == 'neuralprophet':
         errores = ejecutar_forecast(TEST, LISTOS, fecha_limite="2028-03-01")
+    elif modelo == 'prophet':
+        errores = ejecutar_forecast_prophet(TEST, LISTOS, fecha_limite="2028-03-01")
+    elif modelo == 'statsforecast':
+        errores = ejecutar_forecast_statsforecast(TEST, LISTOS, fecha_limite="2028-03-01")
     else:
         errores = ejecutar_forecast_pycaret(TEST, LISTOS, fecha_limite="2028-03-01", modelo=modelo)
 
@@ -496,6 +500,19 @@ def recalcular(equipo: str, ajuste: str = "mas_baja"):
     ajuste: 'mas_alta' o 'mas_baja'
     """
     resultado = recalcular_equipo(TEST, LISTOS, equipo, ajuste, fecha_limite="2028-03-01")
+    if "error" in resultado:
+        return JSONResponse(status_code=400, content=resultado)
+    return resultado
+
+
+@app.post("/api/ajustar-pendiente-historica/{equipo}")
+def ajustar_pendiente_historica_endpoint(equipo: str, invertir: bool = False):
+    """
+    Ajusta el forecast para que su pendiente coincida con la pendiente de
+    crecimiento lineal del histórico del equipo.
+    invertir=true aplica la pendiente con signo opuesto.
+    """
+    resultado = ajustar_pendiente_historica(TEST, LISTOS, equipo, invertir=invertir)
     if "error" in resultado:
         return JSONResponse(status_code=400, content=resultado)
     return resultado
